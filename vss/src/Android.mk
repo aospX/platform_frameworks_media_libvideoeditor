@@ -69,7 +69,8 @@ LOCAL_C_INCLUDES += \
     $(TOP)/frameworks/media/libvideoeditor/vss/common/inc \
     $(TOP)/frameworks/media/libvideoeditor/vss/stagefrightshells/inc \
     $(TOP)/frameworks/base/services/audioflinger \
-    $(TOP)/frameworks/base/include/media/stagefright/openmax
+    $(TOP)/frameworks/base/include/media/stagefright/openmax \
+    $(TOP)/vendor/qcom/opensource/omx/mm-core/omxcore/inc
 
 
 LOCAL_SHARED_LIBRARIES += libdl

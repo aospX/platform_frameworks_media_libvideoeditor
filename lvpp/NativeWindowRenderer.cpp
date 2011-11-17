@@ -28,6 +28,7 @@
 #include <surfaceflinger/Surface.h>
 #include "VideoEditorTools.h"
 
+//#define PREVIEW_DEBUG 1
 #define CHECK_EGL_ERROR CHECK(EGL_SUCCESS == eglGetError())
 #define CHECK_GL_ERROR CHECK(GLenum(GL_NO_ERROR) == glGetError())
 
@@ -399,6 +400,8 @@ void NativeWindowRenderer::queueExternalBuffer(ANativeWindow* anw,
             HAL_PIXEL_FORMAT_YV12);
     native_window_set_usage(anw, GRALLOC_USAGE_SW_WRITE_OFTEN);
 
+    native_window_set_buffer_count(anw, 3);
+
     ANativeWindowBuffer* anb;
     anw->dequeueBuffer(anw, &anb);
     CHECK(anb != NULL);
@@ -410,6 +413,17 @@ void NativeWindowRenderer::queueExternalBuffer(ANativeWindow* anw,
     uint8_t* img = NULL;
     buf->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, (void**)(&img));
     copyI420Buffer(buffer, img, width, height, buf->getStride());
+
+#if PREVIEW_DEBUG
+    FILE *fp1 = fopen("/sdcard/pre_test_yuv.raw", "ab");
+    if(fp1 == NULL)
+        LOGE("Errors file can not be created");
+    else {
+        fwrite(img, buf->getWidth() * buf->getHeight()* 3/2, 1, fp1);
+        fclose(fp1);
+    }
+#endif
+
     buf->unlock();
     CHECK(NO_ERROR == anw->queueBuffer(anw, buf->getNativeBuffer()));
 }

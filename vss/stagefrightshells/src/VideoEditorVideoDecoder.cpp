@@ -32,9 +32,15 @@
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MediaDebug.h>
+#include <media/stagefright/ColorConverter.h>
+
+#include <dlfcn.h>
+#include <OMX_QCOMExtns.h>
+
 /********************
  *   DEFINITIONS    *
  ********************/
+#define ALIGN( num, to ) (((num) + (to-1)) & (~(to-1)))
 #define MAX_DEC_BUFFERS 10
 
 /********************
@@ -794,6 +800,8 @@ M4OSA_ERR VideoEditorVideoDecoder_configureFromMetadata(M4OSA_Context pContext,
     int32_t frameSize = 0;
     int32_t vWidth, vHeight;
     int32_t cropLeft, cropTop, cropRight, cropBottom;
+    int32_t alignedYSize = 0;
+    int32_t alignedCSize = 0;
 
     VIDEOEDITOR_CHECK(M4OSA_NULL != pContext, M4ERR_PARAMETER);
     VIDEOEDITOR_CHECK(M4OSA_NULL != meta,     M4ERR_PARAMETER);
@@ -848,7 +856,13 @@ M4OSA_ERR VideoEditorVideoDecoder_configureFromMetadata(M4OSA_Context pContext,
     // Update the stream handler parameters
     pDecShellContext->m_pVideoStreamhandler->m_videoWidth  = width;
     pDecShellContext->m_pVideoStreamhandler->m_videoHeight = height;
-    frameSize = (width * height * 3) / 2;
+    if (pDecShellContext->mIsQcomComponent) {
+        alignedYSize = ALIGN(width*height, 2048);
+        alignedCSize = ALIGN(width*height/2, 2048);
+    }
+    else {
+        frameSize = (width * height * 3) / 2;
+    }
 
     // Configure the buffer pool
     if( M4OSA_NULL != pDecShellContext->m_pDecBufferPool ) {
@@ -859,9 +873,14 @@ M4OSA_ERR VideoEditorVideoDecoder_configureFromMetadata(M4OSA_Context pContext,
     err =  VIDEOEDITOR_BUFFER_allocatePool(&pDecShellContext->m_pDecBufferPool,
         MAX_DEC_BUFFERS, (M4OSA_Char*)"VIDEOEDITOR_DecodedBufferPool");
     VIDEOEDITOR_CHECK(M4NO_ERROR == err, err);
-    err = VIDEOEDITOR_BUFFER_initPoolBuffers(pDecShellContext->m_pDecBufferPool,
-                frameSize + pDecShellContext->mGivenWidth * 2);
-
+    if (pDecShellContext->mIsQcomComponent) {
+        err = VIDEOEDITOR_BUFFER_initPoolBuffers(pDecShellContext->m_pDecBufferPool,
+                    alignedYSize + alignedCSize);
+    }
+    else {
+        err = VIDEOEDITOR_BUFFER_initPoolBuffers(pDecShellContext->m_pDecBufferPool,
+                    frameSize + pDecShellContext->mGivenWidth * 2);
+    }
     VIDEOEDITOR_CHECK(M4NO_ERROR == err, err);
 
 cleanUp:
@@ -888,7 +907,9 @@ M4OSA_ERR VideoEditorVideoDecoder_destroy(M4OSA_Context pContext) {
     VIDEOEDITOR_CHECK(M4OSA_NULL != pContext, M4ERR_PARAMETER);
 
     // Release the color converter
-    delete pDecShellContext->mI420ColorConverter;
+    if (pDecShellContext->mI420ColorConverter) {
+        delete pDecShellContext->mI420ColorConverter;
+    }
 
     // Destroy the graph
     if( pDecShellContext->mVideoDecoder != NULL ) {
@@ -904,6 +925,13 @@ M4OSA_ERR VideoEditorVideoDecoder_destroy(M4OSA_Context pContext) {
         VIDEOEDITOR_BUFFER_freePool(pDecShellContext->m_pDecBufferPool);
         pDecShellContext->m_pDecBufferPool = M4OSA_NULL;
     }
+
+    if (pDecShellContext->mLibHandle) {
+        LOGV("Closing pDecShellContext->mLibHandle");
+        dlclose(pDecShellContext->mLibHandle);
+        pDecShellContext->mLibHandle = NULL;
+    }
+
     SAFE_FREE(pDecShellContext);
     pContext = NULL;
 
@@ -911,7 +939,7 @@ cleanUp:
     if( M4NO_ERROR == err ) {
         LOGV("VideoEditorVideoDecoder_destroy no error");
     } else {
-        LOGV("VideoEditorVideoDecoder_destroy ERROR 0x%X", err);
+        LOGE("VideoEditorVideoDecoder_destroy ERROR %d", err);
     }
     LOGV("VideoEditorVideoDecoder_destroy end");
     return err;
@@ -1032,6 +1060,15 @@ M4OSA_ERR VideoEditorVideoDecoder_create(M4OSA_Context *pContext,
     VIDEOEDITOR_CHECK(NULL != pDecShellContext->mVideoDecoder.get(),
         M4ERR_SF_DECODER_RSRC_FAIL);
 
+    // Get the component name
+    const char* componentName;
+    pDecShellContext->mVideoDecoder->getFormat()->findCString(kKeyDecoderComponent, &componentName);
+    if (strncmp(componentName, "OMX.qcom", 8) != 0) {
+        pDecShellContext->mIsQcomComponent = false;
+    }
+    else {
+        pDecShellContext->mIsQcomComponent = true;
+    }
 
     // Get the output color format
     success = pDecShellContext->mVideoDecoder->getFormat()->findInt32(
@@ -1045,17 +1082,22 @@ M4OSA_ERR VideoEditorVideoDecoder_create(M4OSA_Context *pContext,
         pDecShellContext->m_pVideoStreamhandler->m_videoHeight);
 
     // Get the color converter
-    pDecShellContext->mI420ColorConverter = new I420ColorConverter;
-    if (pDecShellContext->mI420ColorConverter->isLoaded()) {
-        decoderOutput = pDecShellContext->mI420ColorConverter->getDecoderOutputFormat();
-    }
-
-    if (decoderOutput == OMX_COLOR_FormatYUV420Planar) {
-        delete pDecShellContext->mI420ColorConverter;
+    if(pDecShellContext->mIsQcomComponent) {
         pDecShellContext->mI420ColorConverter = NULL;
     }
+    else {
+        pDecShellContext->mI420ColorConverter = new I420ColorConverter;
+        if (pDecShellContext->mI420ColorConverter->isLoaded()) {
+            decoderOutput = pDecShellContext->mI420ColorConverter->getDecoderOutputFormat();
+        }
 
-    LOGI("decoder output format = 0x%X\n", decoderOutput);
+        if (decoderOutput == OMX_COLOR_FormatYUV420Planar) {
+            delete pDecShellContext->mI420ColorConverter;
+            pDecShellContext->mI420ColorConverter = NULL;
+        }
+
+        LOGV("decoder output format = 0x%X\n", decoderOutput);
+    }
 
     // Configure the buffer pool from the metadata
     err = VideoEditorVideoDecoder_configureFromMetadata(pDecShellContext,
@@ -1077,6 +1119,28 @@ cleanUp:
         LOGV("VideoEditorVideoDecoder_create ERROR 0x%X", err);
     }
     LOGV("VideoEditorVideoDecoder_create : DONE");
+
+#if DEBUG_VIDEODECODER
+    pDecShellContext->mFd = open("/sdcard/ve-transcode-frame.yuv", O_RDWR | O_CREAT);
+#else
+    pDecShellContext->mFd = -1;
+#endif
+
+    //open the conversion handle too
+    if (pDecShellContext->mIsQcomComponent) {
+        pDecShellContext->mLibHandle = dlopen("libmm-color-convertor.so", RTLD_NOW);
+        if (pDecShellContext->mLibHandle) {
+            pDecShellContext->mConvert = (ConvertFn)dlsym(pDecShellContext->mLibHandle,
+                    "_Z7convertN7android18ColorConvertParamsES0_Ph");
+            if(pDecShellContext->mConvert != NULL) {
+                LOGV("Successfully acquired mConvert symbol");
+            }
+        }
+        else {
+            LOGE("Could not get yuvconversion lib handle");
+            assert(0);
+        }
+    }
     return err;
 }
 
@@ -1472,72 +1536,197 @@ static M4OSA_ERR copyBufferToQueue(
 
     if (lerr != M4NO_ERROR) return lerr;
 
-    // Color convert or copy from the given MediaBuffer to our buffer
-    if (pDecShellContext->mI420ColorConverter) {
-        if (pDecShellContext->mI420ColorConverter->convertDecoderOutputToI420(
-            (uint8_t *)pDecoderBuffer->data(),// ?? + pDecoderBuffer->range_offset(),   // decoderBits
-            pDecShellContext->mGivenWidth,  // decoderWidth
-            pDecShellContext->mGivenHeight,  // decoderHeight
-            pDecShellContext->mCropRect,  // decoderRect
-            tmpDecBuffer->pData /* dstBits */) < 0) {
-            LOGE("convertDecoderOutputToI420 failed");
-            lerr = M4ERR_NOT_IMPLEMENTED;
-        }
-    } else if (pDecShellContext->decOuputColorFormat == OMX_COLOR_FormatYUV420Planar) {
-        int32_t width = pDecShellContext->m_pVideoStreamhandler->m_videoWidth;
-        int32_t height = pDecShellContext->m_pVideoStreamhandler->m_videoHeight;
-        int32_t yPlaneSize = width * height;
-        int32_t uvPlaneSize = width * height / 4;
-        int32_t offsetSrc = 0;
-
-        if (( width == pDecShellContext->mGivenWidth )  &&
-            ( height == pDecShellContext->mGivenHeight ))
-        {
-            M4OSA_MemAddr8 pTmpBuff = (M4OSA_MemAddr8)pDecoderBuffer->data() + pDecoderBuffer->range_offset();
-
-            memcpy((void *)tmpDecBuffer->pData, (void *)pTmpBuff, yPlaneSize);
-
-            offsetSrc += pDecShellContext->mGivenWidth * pDecShellContext->mGivenHeight;
-            memcpy((void *)((M4OSA_MemAddr8)tmpDecBuffer->pData + yPlaneSize),
-                (void *)(pTmpBuff + offsetSrc), uvPlaneSize);
-
-            offsetSrc += (pDecShellContext->mGivenWidth >> 1) * (pDecShellContext->mGivenHeight >> 1);
-            memcpy((void *)((M4OSA_MemAddr8)tmpDecBuffer->pData + yPlaneSize + uvPlaneSize),
-                (void *)(pTmpBuff + offsetSrc), uvPlaneSize);
-        }
-        else
-        {
-            M4OSA_MemAddr8 pTmpBuff = (M4OSA_MemAddr8)pDecoderBuffer->data() + pDecoderBuffer->range_offset();
-            M4OSA_MemAddr8 pTmpBuffDst = (M4OSA_MemAddr8)tmpDecBuffer->pData;
-            int32_t index;
-
-            for ( index = 0; index < height; index++)
-            {
-                memcpy((void *)pTmpBuffDst, (void *)pTmpBuff, width);
-                pTmpBuffDst += width;
-                pTmpBuff += pDecShellContext->mGivenWidth;
+    if(!pDecShellContext->mIsQcomComponent) {
+        // Color convert or copy from the given MediaBuffer to our buffer
+        if (pDecShellContext->mI420ColorConverter) {
+            if (pDecShellContext->mI420ColorConverter->convertDecoderOutputToI420(
+                        (uint8_t *)pDecoderBuffer->data(),// ?? + pDecoderBuffer->range_offset(),   // decoderBits
+                        pDecShellContext->mGivenWidth,  // decoderWidth
+                        pDecShellContext->mGivenHeight,  // decoderHeight
+                        pDecShellContext->mCropRect,  // decoderRect
+                        tmpDecBuffer->pData /* dstBits */) < 0) {
+                LOGE("convertDecoderOutputToI420 failed");
+                lerr = M4ERR_NOT_IMPLEMENTED;
             }
+        } else if (pDecShellContext->decOuputColorFormat == OMX_COLOR_FormatYUV420Planar) {
+            int32_t width = pDecShellContext->m_pVideoStreamhandler->m_videoWidth;
+            int32_t height = pDecShellContext->m_pVideoStreamhandler->m_videoHeight;
+            int32_t yPlaneSize = width * height;
+            int32_t uvPlaneSize = width * height / 4;
+            int32_t offsetSrc = 0;
 
-            pTmpBuff += (pDecShellContext->mGivenWidth * ( pDecShellContext->mGivenHeight - height));
-            for ( index = 0; index < height >> 1; index++)
+            if (( width == pDecShellContext->mGivenWidth )  &&
+                    ( height == pDecShellContext->mGivenHeight ))
             {
-                memcpy((void *)pTmpBuffDst, (void *)pTmpBuff, width >> 1);
-                pTmpBuffDst += width >> 1;
-                pTmpBuff += pDecShellContext->mGivenWidth >> 1;
-            }
+                M4OSA_MemAddr8 pTmpBuff = (M4OSA_MemAddr8)pDecoderBuffer->data() + pDecoderBuffer->range_offset();
 
-            pTmpBuff += ((pDecShellContext->mGivenWidth * (pDecShellContext->mGivenHeight - height)) / 4);
-            for ( index = 0; index < height >> 1; index++)
-            {
-                memcpy((void *)pTmpBuffDst, (void *)pTmpBuff, width >> 1);
-                pTmpBuffDst += width >> 1;
-                pTmpBuff += pDecShellContext->mGivenWidth >> 1;
+                memcpy((void *)tmpDecBuffer->pData, (void *)pTmpBuff, yPlaneSize);
+
+                offsetSrc += pDecShellContext->mGivenWidth * pDecShellContext->mGivenHeight;
+                memcpy((void *)((M4OSA_MemAddr8)tmpDecBuffer->pData + yPlaneSize),
+                        (void *)(pTmpBuff + offsetSrc), uvPlaneSize);
+
+                offsetSrc += (pDecShellContext->mGivenWidth >> 1) * (pDecShellContext->mGivenHeight >> 1);
+                memcpy((void *)((M4OSA_MemAddr8)tmpDecBuffer->pData + yPlaneSize + uvPlaneSize),
+                        (void *)(pTmpBuff + offsetSrc), uvPlaneSize);
             }
+            else
+            {
+                M4OSA_MemAddr8 pTmpBuff = (M4OSA_MemAddr8)pDecoderBuffer->data() + pDecoderBuffer->range_offset();
+                M4OSA_MemAddr8 pTmpBuffDst = (M4OSA_MemAddr8)tmpDecBuffer->pData;
+                int32_t index;
+
+                for ( index = 0; index < height; index++)
+                {
+                    memcpy((void *)pTmpBuffDst, (void *)pTmpBuff, width);
+                    pTmpBuffDst += width;
+                    pTmpBuff += pDecShellContext->mGivenWidth;
+                }
+
+                pTmpBuff += (pDecShellContext->mGivenWidth * ( pDecShellContext->mGivenHeight - height));
+                for ( index = 0; index < height >> 1; index++)
+                {
+                    memcpy((void *)pTmpBuffDst, (void *)pTmpBuff, width >> 1);
+                    pTmpBuffDst += width >> 1;
+                    pTmpBuff += pDecShellContext->mGivenWidth >> 1;
+                }
+
+                pTmpBuff += ((pDecShellContext->mGivenWidth * (pDecShellContext->mGivenHeight - height)) / 4);
+                for ( index = 0; index < height >> 1; index++)
+                {
+                    memcpy((void *)pTmpBuffDst, (void *)pTmpBuff, width >> 1);
+                    pTmpBuffDst += width >> 1;
+                    pTmpBuff += pDecShellContext->mGivenWidth >> 1;
+                }
+            }
+        } else {
+            LOGE("VideoDecoder_decode: unexpected color format 0x%X",
+                    pDecShellContext->decOuputColorFormat);
+            lerr = M4ERR_PARAMETER;
         }
-    } else {
-        LOGE("VideoDecoder_decode: unexpected color format 0x%X",
-            pDecShellContext->decOuputColorFormat);
-        lerr = M4ERR_PARAMETER;
+    }
+    else {
+        switch ( pDecShellContext->decOuputColorFormat ) {
+            case QOMX_COLOR_FormatYUV420PackedSemiPlanar64x32Tile2m8ka:
+                {
+                    /* Convert to YV12 or YUVPlanar depending on the context */
+                    LOGV("QOMX_COLOR_FormatYUV420PackedSemiPlanar64x32Tile2m8ka detected");
+
+                    int32_t mVideoWidth = pDecShellContext->m_pVideoStreamhandler->m_videoWidth;
+                    int32_t mVideoHeight = pDecShellContext->m_pVideoStreamhandler->m_videoHeight;
+
+                    M4OSA_MemAddr8 inBuffer = (M4OSA_MemAddr8)pDecoderBuffer->data()+
+                        pDecoderBuffer->range_offset();
+
+                    ColorConvertParams inputCP;
+                    inputCP.width = ALIGN(mVideoWidth, 128);
+                    inputCP.height = ALIGN(mVideoHeight, 32);
+                    inputCP.cropWidth = mVideoWidth;
+                    inputCP.cropHeight = mVideoHeight;
+                    inputCP.cropLeft = 0;
+                    inputCP.cropRight = mVideoWidth;
+                    inputCP.cropTop = 0;
+                    inputCP.cropBottom = mVideoHeight;
+                    inputCP.colorFormat = YCbCr420Tile;
+                    inputCP.data = (uint8_t *)inBuffer;
+                    inputCP.flags = COLOR_CONVERT_ALIGN_NONE;
+                    inputCP.fd = -1;
+
+                    ColorConvertParams outputCP;
+                    outputCP.width = mVideoWidth;
+                    outputCP.height = mVideoHeight;
+                    outputCP.cropWidth = mVideoWidth;
+                    outputCP.cropHeight = mVideoHeight;
+                    outputCP.cropLeft = 0;
+                    outputCP.cropRight = mVideoWidth;
+                    outputCP.cropTop = 0;
+                    outputCP.cropBottom = mVideoHeight;
+                    outputCP.fd = -1;
+
+                    outputCP.flags = COLOR_CONVERT_ALIGN_NONE;
+                    outputCP.colorFormat = YCbCr420P;
+                    outputCP.data = (uint8_t *)tmpDecBuffer->pData;
+
+                    LOGV("Convert to Planar");
+                    pDecShellContext->mConvert( inputCP, outputCP, NULL);
+
+#if DEBUG_VIDEODECODER
+                    if (pDecShellContext->mFd != -1) {
+                        int size = mVideoWidth*mVideoHeight;
+                        LOGE("VideoEditorVideoDecoder transcode DUMP frame of dimensions"
+                                " %d x %d, total size %d",
+                                mVideoWidth,
+                                mVideoHeight, size);
+                        write(pDecShellContext->mFd, outputCP.data, size * 3/2);
+                        close(pDecShellContext->mFd);
+                        pDecShellContext->mFd = -1;
+                    }
+#endif
+                    break;
+                }
+            case OMX_COLOR_FormatYUV420Planar:
+                {
+                    int32_t width = pDecShellContext->m_pVideoStreamhandler->m_videoWidth;
+                    int32_t height = pDecShellContext->m_pVideoStreamhandler->m_videoHeight;
+                    int32_t yPlaneSize = width * height;
+                    int32_t uvPlaneSize = width * height / 4;
+                    int32_t offsetSrc = 0;
+
+                    if (( width == pDecShellContext->mGivenWidth )  &&
+                            ( height == pDecShellContext->mGivenHeight ))
+                    {
+                        M4OSA_MemAddr8 pTmpBuff = (M4OSA_MemAddr8)pDecoderBuffer->data() + pDecoderBuffer->range_offset();
+
+                        memcpy((void *)tmpDecBuffer->pData, (void *)pTmpBuff, yPlaneSize);
+
+                        offsetSrc += pDecShellContext->mGivenWidth * pDecShellContext->mGivenHeight;
+                        memcpy((void *)((M4OSA_MemAddr8)tmpDecBuffer->pData + yPlaneSize),
+                                (void *)(pTmpBuff + offsetSrc), uvPlaneSize);
+
+                        offsetSrc += (pDecShellContext->mGivenWidth >> 1) * (pDecShellContext->mGivenHeight >> 1);
+                        memcpy((void *)((M4OSA_MemAddr8)tmpDecBuffer->pData + yPlaneSize + uvPlaneSize),
+                                (void *)(pTmpBuff + offsetSrc), uvPlaneSize);
+                    }
+                    else
+                    {
+                        M4OSA_MemAddr8 pTmpBuff = (M4OSA_MemAddr8)pDecoderBuffer->data() + pDecoderBuffer->range_offset();
+                        M4OSA_MemAddr8 pTmpBuffDst = (M4OSA_MemAddr8)tmpDecBuffer->pData;
+                        int32_t index;
+
+                        for ( index = 0; index < height; index++)
+                        {
+                            memcpy((void *)pTmpBuffDst, (void *)pTmpBuff, width);
+                            pTmpBuffDst += width;
+                            pTmpBuff += pDecShellContext->mGivenWidth;
+                        }
+
+                        pTmpBuff += (pDecShellContext->mGivenWidth * ( pDecShellContext->mGivenHeight - height));
+                        for ( index = 0; index < height >> 1; index++)
+                        {
+                            memcpy((void *)pTmpBuffDst, (void *)pTmpBuff, width >> 1);
+                            pTmpBuffDst += width >> 1;
+                            pTmpBuff += pDecShellContext->mGivenWidth >> 1;
+                        }
+
+                        pTmpBuff += ((pDecShellContext->mGivenWidth * (pDecShellContext->mGivenHeight - height)) / 4);
+                        for ( index = 0; index < height >> 1; index++)
+                        {
+                            memcpy((void *)pTmpBuffDst, (void *)pTmpBuff, width >> 1);
+                            pTmpBuffDst += width >> 1;
+                            pTmpBuff += pDecShellContext->mGivenWidth >> 1;
+                        }
+                    }
+                    break;
+                }
+            default:
+                LOGE("VideoDecoder_decode: unexpected color format 0x%X",
+                        pDecShellContext->decOuputColorFormat);
+                if (pDecoderBuffer != NULL) {
+                    pDecoderBuffer->release();
+                    pDecoderBuffer = NULL;
+                }
+                lerr = M4ERR_PARAMETER;
+        }
     }
 
     tmpDecBuffer->buffCTS = pDecShellContext->m_lastDecodedCTS;

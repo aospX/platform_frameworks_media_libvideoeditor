@@ -45,7 +45,9 @@ LOCAL_C_INCLUDES += \
     $(TOP)/frameworks/media/libvideoeditor/lvpp \
     $(TOP)/frameworks/media/libvideoeditor/osal/inc \
     $(TOP)/frameworks/media/libvideoeditor/include \
-    $(TOP)/frameworks/media/libvideoeditor/vss/stagefrightshells/inc
+    $(TOP)/frameworks/media/libvideoeditor/vss/stagefrightshells/inc \
+    $(TOP)/frameworks/media/colorconversion \
+    $(TOP)/vendor/qcom/opensource/omx/mm-core/omxcore/inc
 
 LOCAL_SHARED_LIBRARIES := \
     libcutils \
@@ -57,7 +59,8 @@ LOCAL_SHARED_LIBRARIES := \
     libstagefright \
     libstagefright_omx \
     libgui \
-    libvideoeditorplayer
+    libvideoeditorplayer \
+    libdl
 
 LOCAL_CFLAGS += \
 
