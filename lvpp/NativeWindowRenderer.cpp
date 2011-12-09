@@ -104,7 +104,7 @@ static const char fSrcNegative[] =
     "void main() {\n"
     "  vec4 rgb = texture2D(texSampler, texCoords);\n"
     "  vec4 yuv = rgb2yuv * rgb;\n"
-    "  yuv = vec4(255.0 - yuv.x, yuv.y, yuv.z, 1.0);\n"
+    "  yuv = vec4(255.0 - yuv.x, yuv.y, yuv.z, yuv.w);\n"
     "  gl_FragColor = yuv2rgb * yuv;\n"
     "}\n";
 

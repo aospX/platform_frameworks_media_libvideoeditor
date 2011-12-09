@@ -1138,7 +1138,7 @@ cleanUp:
         }
         else {
             LOGE("Could not get yuvconversion lib handle");
-            assert(0);
+            CHECK(0);
         }
     }
     return err;

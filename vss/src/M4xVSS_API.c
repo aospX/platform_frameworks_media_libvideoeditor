@@ -2436,11 +2436,11 @@ M4OSA_ERR M4xVSS_SendCommand( M4OSA_Context pContext,
              * to be transcoded(do not do compress domain trim).
              * Also for MPEG4 fomart, always do transcoding since HW encoder
              * may use different time scale value than the input clip*/
-           if ((fileProperties.uiVideoProfile >
+           if (((fileProperties.uiVideoProfile >
                      xVSS_context->pSettings->xVSS.outputVideoProfile) ||
                 (fileProperties.uiVideoLevel >
                      xVSS_context->pSettings->xVSS.outputVideoLevel) ||
-                (fileProperties.VideoStreamType == M4VIDEOEDITING_kMPEG4)) {
+                (fileProperties.VideoStreamType == M4VIDEOEDITING_kMPEG4)) && (xVSS_context->pSettings->nbEffects == 0)) {
                /* Set bTranscodingRequired to TRUE to indicate the video will be
                 * transcoded in MCS. */
                xVSS_context->pSettings->pClipList[i]->bTranscodingRequired =

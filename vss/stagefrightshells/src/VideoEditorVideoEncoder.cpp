@@ -19,7 +19,7 @@
 * @brief  StageFright shell video encoder
 *************************************************************************
 */
-#define LOG_NDEBUG 0
+#define LOG_NDEBUG 1
 #define LOG_TAG "VIDEOEDITOR_VIDEOENCODER"
 
 /*******************
@@ -61,6 +61,18 @@
 /********************
  *   SOURCE CLASS   *
  ********************/
+static const int32_t H264_Bitrate[][3] =
+{
+    {48000,72000,96000}, // SQCIF
+    {96000,128000,192000}, // QQVGA, QCIF
+    {256000,384000,512000}, // QVGA
+    {320000,512000,720000}, // CIF
+    {512000,960000,1536000}, // VGA
+    {768000,1280000,2048000}, // NTSC , WVGA
+    {832000,1392000,2224000}, // FWVGA
+    {5232000,8768000,14000000}, // 720P
+    {7552000,11520000,20000000}, // 1080P
+};
 
 namespace android {
 
@@ -683,7 +695,7 @@ cleanUp:
         }
         else {
             LOGE("Could not get yuvconversion lib handle");
-            assert(0);
+            CHECK(0);
         }
     }
 
@@ -771,6 +783,98 @@ cleanUp:
     return err;
 }
 
+void VideoEditorVideoEncoder_reconfigureBitrate(VideoEditorVideoEncoder_Context* pEncoderContext) {
+
+    //TODO : Span it out for all framerates
+    int encode_quality_index = 0;
+    int encode_resolution_index = 0;
+    LOGV("Bitrate before reconfig is %d\n",pEncoderContext->mCodecParams->Bitrate);
+    int32_t bitrate = (int32_t)pEncoderContext->mCodecParams->Bitrate;
+    switch (bitrate) {
+        case 512000:
+            encode_quality_index = 0;
+            break;
+        case 2000000:
+            encode_quality_index = 1;
+            break;
+        case 8000000:
+            encode_quality_index = 2;
+            break;
+        case 128000:    // transition values
+        case 384000:
+        case 5000000:
+            encode_quality_index = 1;
+            break;
+        default:
+            LOGE("VideoEncoder_reconfigureBitrate : copying bitrate from the input file");
+            LOGE("pEncoderContext->mCodecParams->Bitrate is %x\n",bitrate);
+            return;
+    }
+
+    switch (pEncoderContext->mCodecParams->FrameWidth) {
+        case 128://SQCIF
+            encode_resolution_index = 0;
+            break;
+        case 160://QQVGA
+            encode_resolution_index = 1;
+            break;
+        case 176://QCIF
+            encode_resolution_index = 1;
+            break;
+        case 320://QVGA
+            encode_resolution_index = 2;
+            break;
+        case 352://CIF
+            encode_resolution_index = 3;
+            break;
+        case 640://VGA
+            encode_resolution_index = 4;
+            break;
+        case 720://NTSC
+            encode_resolution_index = 5;
+            break;
+        case 800://WVGA
+            encode_resolution_index = 5;
+            break;
+        case 848://854 - FWVGA
+            encode_resolution_index = 6;
+            break;
+        case 960://720P
+            encode_resolution_index = 7;
+            break;
+        case 1024://XVGA - 720P
+            encode_resolution_index = 7;
+            break;
+        case 1088://1080 - 720P
+            encode_resolution_index = 7;
+            break;
+        case 1280://720P
+            encode_resolution_index = 7;
+            break;
+        case 1920://1080P
+            encode_resolution_index = 8;
+            break;
+        default:
+            LOGE("VideoEncoder_reconfigureBitrate : incorrect output width from app");
+            LOGE("pEncoderContext->mCodecParams->Width is %d and height is %d\n",pEncoderContext->mCodecParams->FrameWidth,pEncoderContext->mCodecParams->FrameHeight);
+            CHECK(0);
+            break;
+    }
+
+    switch (pEncoderContext->mCodecParams->Format) {
+        case M4ENCODER_kH264:
+            pEncoderContext->mCodecParams->Bitrate = (M4ENCODER_Bitrate)H264_Bitrate[encode_resolution_index][encode_quality_index];
+            break;
+        case M4ENCODER_kH263:
+        case M4ENCODER_kMPEG4:
+        default:
+            LOGE("VideoEncoder_reconfigureBitrate : incorrect output format from app");
+            CHECK(0);
+            break;
+    }
+    LOGV("Bitrate After reconfig is %d\n",pEncoderContext->mCodecParams->Bitrate);
+    return;
+}
 
 M4OSA_ERR VideoEditorVideoEncoder_open(M4ENCODER_Context pContext,
         M4SYS_AccessUnit* pAU, M4OSA_Void* pParams) {
@@ -849,13 +953,7 @@ M4OSA_ERR VideoEditorVideoEncoder_open(M4ENCODER_Context pContext,
     }
     iProfile = pEncoderContext->mCodecParams->videoProfile;
     iLevel = pEncoderContext->mCodecParams->videoLevel;
-    LOGV("Encoder mime %s profile %d, level %d",
-        mime,iProfile, iLevel);
-    LOGV("Encoder w %d, h %d, bitrate %d, fps %d",
-        pEncoderContext->mCodecParams->FrameWidth,
-        pEncoderContext->mCodecParams->FrameHeight,
-        pEncoderContext->mCodecParams->Bitrate,
-        pEncoderContext->mCodecParams->FrameRate);
+
     CHECK(iProfile != 0x7fffffff);
     CHECK(iLevel != 0x7fffffff);
 
@@ -900,6 +998,9 @@ M4OSA_ERR VideoEditorVideoEncoder_open(M4ENCODER_Context pContext,
                 M4ERR_STATE);
             break;
     }
+    /*reconfigure output bitrate based on resolution*/
+    VideoEditorVideoEncoder_reconfigureBitrate(pEncoderContext);
+
     encoderMetadata->setInt32(kKeyFrameRate, iFrameRate);
     encoderMetadata->setInt32(kKeyBitRate,
         (int32_t)pEncoderContext->mCodecParams->Bitrate);
@@ -907,6 +1008,14 @@ M4OSA_ERR VideoEditorVideoEncoder_open(M4ENCODER_Context pContext,
 
     encoderMetadata->setInt32(kKeyColorFormat,
         pEncoderContext->mEncoderColorFormat);
+
+    LOGV("Encoder mime %s profile %d, level %d",
+        mime,iProfile, iLevel);
+    LOGV("Encoder w %d, h %d, bitrate %d, fps %d",
+        pEncoderContext->mCodecParams->FrameWidth,
+        pEncoderContext->mCodecParams->FrameHeight,
+        pEncoderContext->mCodecParams->Bitrate,
+        iFrameRate);
 
     if (pEncoderContext->mCodecParams->Format != M4ENCODER_kH263) {
         // Get the encoder DSI
