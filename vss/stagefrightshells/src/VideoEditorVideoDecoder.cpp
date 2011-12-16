@@ -932,6 +932,7 @@ M4OSA_ERR VideoEditorVideoDecoder_create(M4OSA_Context *pContext,
     M4OSA_UInt32 size = 0;
     sp<MetaData> decoderMetadata = NULL;
     int decoderOutput = OMX_COLOR_FormatYUV420Planar;
+    uint32_t flags = 0;
 
     LOGV("VideoEditorVideoDecoder_create begin");
     // Input parameters check
@@ -1028,9 +1029,12 @@ M4OSA_ERR VideoEditorVideoDecoder_create(M4OSA_Context *pContext,
     VIDEOEDITOR_CHECK(OK == status, M4ERR_SF_DECODER_RSRC_FAIL);
 
     // Create the decoder
+    if (pDecShellContext->m_pVideoStreamhandler->m_videoWidth  * pDecShellContext->m_pVideoStreamhandler->m_videoHeight >= 1920 * 1080) {
+        flags |= OMXCodec::kUseMinBufferCount;
+    }
     pDecShellContext->mVideoDecoder = OMXCodec::Create(
         pDecShellContext->mClient.interface(),
-        decoderMetadata, false, pDecShellContext->mReaderSource);
+        decoderMetadata, false, pDecShellContext->mReaderSource, NULL, flags);
     VIDEOEDITOR_CHECK(NULL != pDecShellContext->mVideoDecoder.get(),
         M4ERR_SF_DECODER_RSRC_FAIL);
 
