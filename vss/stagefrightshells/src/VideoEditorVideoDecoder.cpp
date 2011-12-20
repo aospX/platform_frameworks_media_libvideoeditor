@@ -1460,6 +1460,11 @@ M4OSA_ERR VideoEditorVideoDecoder_decode(M4OSA_Context context,
                 break;
             }
             continue;
+        } else if (errStatus != OK) {
+            LOGE("VideoEditorVideoDecoder_decode ERROR:0x%x(%d)",
+                errStatus,errStatus);
+            lerr = errStatus;
+            goto VIDEOEDITOR_VideoDecode_cleanUP;
         }
 
         // The OMXCodec client should expect to receive 0-length buffers

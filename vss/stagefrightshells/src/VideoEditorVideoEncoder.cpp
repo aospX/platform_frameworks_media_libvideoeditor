@@ -39,6 +39,7 @@
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/OMXClient.h>
 #include <media/stagefright/OMXCodec.h>
+#include <media/MediaProfiles.h>
 #include "OMX_Video.h"
 #include <media/stagefright/ColorConverter.h>
 #include <dlfcn.h>
@@ -86,6 +87,7 @@ struct VideoEditorVideoEncoderSource : public MediaSource {
         virtual status_t read(MediaBuffer **buffer,
             const ReadOptions *options = NULL);
         virtual int32_t storeBuffer(MediaBuffer *buffer);
+        virtual int32_t getNumberOfBuffersInQueue();
 
     protected:
         virtual ~VideoEditorVideoEncoderSource();
@@ -260,6 +262,10 @@ int32_t VideoEditorVideoEncoderSource::storeBuffer(MediaBuffer *buffer) {
     return mNbBuffer;
 }
 
+int32_t VideoEditorVideoEncoderSource::getNumberOfBuffersInQueue() {
+    Mutex::Autolock autolock(mLock);
+    return mNbBuffer;
+}
 /********************
  *      PULLER      *
  ********************/
@@ -275,6 +281,7 @@ public:
     MediaBuffer* getBufferBlocking();
     MediaBuffer* getBufferNonBlocking();
     void putBuffer(MediaBuffer* buffer);
+    bool hasMediaSourceReturnedError();
 private:
     static int acquireThreadStart(void* arg);
     void acquireThreadFunc();
@@ -295,6 +302,7 @@ private:
     bool mAskToStop;       // Asks the threads to stop
     bool mAcquireStopped;  // The acquire thread has stopped
     bool mReleaseStopped;  // The release thread has stopped
+    status_t mSourceError; // Error returned by MediaSource read
 };
 
 VideoEditorVideoEncoderPuller::VideoEditorVideoEncoderPuller(
@@ -304,6 +312,7 @@ VideoEditorVideoEncoderPuller::VideoEditorVideoEncoderPuller(
     mAskToStop = false;
     mAcquireStopped = false;
     mReleaseStopped = false;
+    mSourceError = OK;
     androidCreateThread(acquireThreadStart, this);
     androidCreateThread(releaseThreadStart, this);
 }
@@ -312,6 +321,10 @@ VideoEditorVideoEncoderPuller::~VideoEditorVideoEncoderPuller() {
     stop();
 }
 
+bool VideoEditorVideoEncoderPuller::hasMediaSourceReturnedError() {
+    Mutex::Autolock autolock(mLock);
+    return ((mSourceError != OK) ? true : false);
+}
 void VideoEditorVideoEncoderPuller::start() {
     Mutex::Autolock autolock(mLock);
     mAskToStart = true;
@@ -399,6 +412,7 @@ void VideoEditorVideoEncoderPuller::acquireThreadFunc() {
         mLock.unlock();
         status_t result = mSource->read(&pBuffer, NULL);
         mLock.lock();
+        mSourceError = result;
         if (result != OK) {
             break;
         }
@@ -486,6 +500,8 @@ typedef struct {
     ConvertFn                         mConvert;
     int                               mFd;
     bool                              mIsQcomComponent;
+    MediaProfiles *mVideoEditorProfile;
+    int32_t mMaxPrefetchFrames;
 } VideoEditorVideoEncoder_Context;
 
 /********************
@@ -902,6 +918,10 @@ M4OSA_ERR VideoEditorVideoEncoder_open(M4ENCODER_Context pContext,
 
     // Context initialization
     pEncoderContext->mAccessUnit = pAU;
+    pEncoderContext->mVideoEditorProfile = MediaProfiles::getInstance();
+    pEncoderContext->mMaxPrefetchFrames =
+        pEncoderContext->mVideoEditorProfile->getVideoEditorCapParamByName(
+        "maxPrefetchYUVFrames");
 
     // Allocate & initialize the encoding parameters
     SAFE_MALLOC(pEncoderContext->mCodecParams, M4ENCODER_Params, 1,
@@ -1438,14 +1458,25 @@ M4OSA_ERR VideoEditorVideoEncoder_encode(M4ENCODER_Context pContext,
         MediaBuffer *outputBuffer =
                 pEncoderContext->mPuller->getBufferNonBlocking();
 
-        if (outputBuffer == NULL) break;
+        if (outputBuffer == NULL) {
+            int32_t YUVBufferNumber =
+                    pEncoderContext->mEncoderSource->getNumberOfBuffersInQueue();
+            /* Make sure that the configured maximum number of prefetch YUV frames is
+             * not exceeded. This is to limit the amount of memory usage of video editor engine.
+             * The value of maximum prefetch Yuv frames is defined in media_profiles.xml */
+            if ((YUVBufferNumber < pEncoderContext->mMaxPrefetchFrames) ||
+                (pEncoderContext->mPuller->hasMediaSourceReturnedError()
+                    == true)) {
+                break;
+            }
+        } else {
+            // Provide the encoded AU to the writer
+            err = VideoEditorVideoEncoder_processOutputBuffer(pEncoderContext,
+                outputBuffer);
+            VIDEOEDITOR_CHECK(M4NO_ERROR == err, err);
 
-        // Provide the encoded AU to the writer
-        err = VideoEditorVideoEncoder_processOutputBuffer(pEncoderContext,
-            outputBuffer);
-        VIDEOEDITOR_CHECK(M4NO_ERROR == err, err);
-
-        pEncoderContext->mPuller->putBuffer(outputBuffer);
+            pEncoderContext->mPuller->putBuffer(outputBuffer);
+        }
     }
 
 cleanUp:
