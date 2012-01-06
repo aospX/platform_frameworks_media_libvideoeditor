@@ -774,8 +774,12 @@ void VideoEditorVideoEncoder_reconfigureBitrate(VideoEditorVideoEncoder_Context*
             encode_quality_index = 1;
             break;
         default:
-            LOGE("VideoEncoder_reconfigureBitrate : copying bitrate from the input file");
-            LOGE("pEncoderContext->mCodecParams->Bitrate is %x\n",bitrate);
+            LOGW("VideoEncoder_reconfigureBitrate : copying bitrate from the input file");
+            LOGW("Bitrate is %d\n",bitrate);
+            if (bitrate > 20000000) {
+                pEncoderContext->mCodecParams->Bitrate = ((M4ENCODER_Bitrate)20000000);
+                LOGW("Limiting bitrate to max value of 20000000\n");
+            }
             return;
     }
 
