@@ -115,10 +115,6 @@ typedef struct {
                                                        //INFO_FORMAT_CHANGED
     ARect                   mCropRect;  // These are obtained from kKeyCropRect.
     I420ColorConverter*     mI420ColorConverter;
-    int                     mFd;
-    void*                   mLibHandle;
-    ConvertFn               mConvert;
-    bool                    mIsQcomComponent;
 
 } VideoEditorVideoDecoder_Context;
 

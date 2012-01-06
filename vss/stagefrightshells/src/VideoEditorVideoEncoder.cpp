@@ -41,16 +41,10 @@
 #include <media/stagefright/OMXCodec.h>
 #include <media/MediaProfiles.h>
 #include "OMX_Video.h"
-#include <media/stagefright/ColorConverter.h>
-#include <dlfcn.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/stat.h>
 
 /********************
  *   DEFINITIONS    *
  ********************/
-#define ALIGN( num, to ) (((num) + (to-1)) & (~(to-1)))
 
 // Force using hardware encoder
 #define VIDEOEDITOR_FORCECODEC kHardwareCodecsOnly
@@ -496,10 +490,6 @@ typedef struct {
     int64_t                           mFirstOutputCts;
     int64_t                           mLastOutputCts;
 
-    void*                             mLibHandle;
-    ConvertFn                         mConvert;
-    int                               mFd;
-    bool                              mIsQcomComponent;
     MediaProfiles *mVideoEditorProfile;
     int32_t mMaxPrefetchFrames;
 } VideoEditorVideoEncoder_Context;
@@ -646,7 +636,7 @@ M4OSA_ERR VideoEditorVideoEncoder_init(M4ENCODER_Format format,
 
     M4OSA_ERR err = M4NO_ERROR;
     VideoEditorVideoEncoder_Context* pEncoderContext = M4OSA_NULL;
-    int encoderInput = 0;
+    int encoderInput = OMX_COLOR_FormatYUV420Planar;
 
     LOGV("VideoEditorVideoEncoder_init begin: format  %d", format);
     // Input parameters check
@@ -658,7 +648,6 @@ M4OSA_ERR VideoEditorVideoEncoder_init(M4ENCODER_Format format,
     // Context allocation & initialization
     SAFE_MALLOC(pEncoderContext, VideoEditorVideoEncoder_Context, 1,
         "VideoEditorVideoEncoder");
-    pEncoderContext->mIsQcomComponent = true;
     pEncoderContext->mState = CREATED;
     pEncoderContext->mFormat = format;
     pEncoderContext->mWriterDataInterface = pWriterDataInterface;
@@ -666,28 +655,15 @@ M4OSA_ERR VideoEditorVideoEncoder_init(M4ENCODER_Format format,
     pEncoderContext->mPreProcContext = pVPPctxt;
     pEncoderContext->mPuller = NULL;
 
-    if (pEncoderContext->mIsQcomComponent) {
-        encoderInput = OMX_COLOR_FormatYUV420SemiPlanar;
+    // Get color converter and determine encoder input format
+    pEncoderContext->mI420ColorConverter = new I420ColorConverter;
+    if (pEncoderContext->mI420ColorConverter->isLoaded()) {
+        encoderInput = pEncoderContext->mI420ColorConverter->getEncoderInputFormat();
     }
-    else {
-        encoderInput = OMX_COLOR_FormatYUV420Planar;
-    }
-
-    if (pEncoderContext->mIsQcomComponent) {
+    if (encoderInput == OMX_COLOR_FormatYUV420Planar) {
+        delete pEncoderContext->mI420ColorConverter;
         pEncoderContext->mI420ColorConverter = NULL;
     }
-    else {
-        // Get color converter and determine encoder input format
-        pEncoderContext->mI420ColorConverter = new I420ColorConverter;
-        if (pEncoderContext->mI420ColorConverter->isLoaded()) {
-            encoderInput = pEncoderContext->mI420ColorConverter->getEncoderInputFormat();
-        }
-        if (encoderInput == OMX_COLOR_FormatYUV420Planar) {
-            delete pEncoderContext->mI420ColorConverter;
-            pEncoderContext->mI420ColorConverter = NULL;
-        }
-    }
-
     pEncoderContext->mEncoderColorFormat = (OMX_COLOR_FORMATTYPE)encoderInput;
     LOGV("encoder input format = 0x%X\n", encoderInput);
 
@@ -701,25 +677,6 @@ cleanUp:
         *pContext = M4OSA_NULL;
         LOGV("VideoEditorVideoEncoder_init ERROR 0x%X", err);
     }
-
-    if (pEncoderContext->mIsQcomComponent) {
-        pEncoderContext->mLibHandle = dlopen("libmm-color-convertor.so", RTLD_NOW);
-        if (pEncoderContext->mLibHandle) {
-            pEncoderContext->mConvert = (ConvertFn)dlsym(pEncoderContext->mLibHandle,
-                    "_Z7convertN7android18ColorConvertParamsES0_Ph");
-            //assert(pEncoderContext->mInterleave != NULL);
-        }
-        else {
-            LOGE("Could not get yuvconversion lib handle");
-            CHECK(0);
-        }
-    }
-
-#if DEBUG_VIDEOEDITORVIDEOENCODER
-    pEncoderContext->mFd = open("/sdcard/ve-frame.yuv", O_RDWR | O_CREAT);
-#else
-    pEncoderContext->mFd = -1;
-#endif
 
     LOGV("VideoEditorVideoEncoder_init end");
     return err;
@@ -783,11 +740,6 @@ M4OSA_ERR VideoEditorVideoEncoder_close(M4ENCODER_Context pContext) {
 
     // Set the new state
     pEncoderContext->mState = CREATED;
-
-    if (pEncoderContext->mLibHandle) {
-        dlclose(pEncoderContext->mLibHandle);
-        pEncoderContext->mLibHandle = NULL;
-    }
 
 cleanUp:
     if( M4NO_ERROR == err ) {
@@ -1065,16 +1017,6 @@ M4OSA_ERR VideoEditorVideoEncoder_open(M4ENCODER_Context pContext,
     pEncoderContext->mPuller = new VideoEditorVideoEncoderPuller(
         pEncoderContext->mEncoder);
 
-    // Get the component name
-    const char* componentName;
-    pEncoderContext->mEncoder->getFormat()->findCString(kKeyDecoderComponent, &componentName);
-    if (strncmp(componentName, "OMX.qcom", 8) != 0) {
-        pEncoderContext->mIsQcomComponent = false;
-    }
-    else {
-        pEncoderContext->mIsQcomComponent = true;
-    }
-
     // Set the new state
     pEncoderContext->mState = OPENED;
 
@@ -1097,7 +1039,6 @@ M4OSA_ERR VideoEditorVideoEncoder_processInputBuffer(
     M4VIFI_ImagePlane pOutPlane[3];
     MediaBuffer* buffer = NULL;
     int32_t nbBuffer = 0;
-    M4OSA_UInt8* tempBuffer = M4OSA_NULL;
 
     LOGV("VideoEditorVideoEncoder_processInputBuffer begin: cts  %f", Cts);
     // Input parameters check
@@ -1109,152 +1050,69 @@ M4OSA_ERR VideoEditorVideoEncoder_processInputBuffer(
     pOutPlane[2].pac_data = M4OSA_NULL;
 
     if ( M4OSA_FALSE == bReachedEOS ) {
-        if (!pEncoderContext->mIsQcomComponent) {
-            M4OSA_UInt32 sizeY = pEncoderContext->mCodecParams->FrameWidth *
-                pEncoderContext->mCodecParams->FrameHeight;
-            M4OSA_UInt32 sizeU = sizeY >> 2;
-            M4OSA_UInt32 size  = sizeY + 2*sizeU;
-            M4OSA_UInt8* pData = M4OSA_NULL;
-            buffer = new MediaBuffer((size_t)size);
-            pData = (M4OSA_UInt8*)buffer->data() + buffer->range_offset();
 
-            // Prepare the output image for pre-processing
-            pOutPlane[0].u_width   = pEncoderContext->mCodecParams->FrameWidth;
-            pOutPlane[0].u_height  = pEncoderContext->mCodecParams->FrameHeight;
-            pOutPlane[0].u_topleft = 0;
-            pOutPlane[0].u_stride  = pOutPlane[0].u_width;
-            pOutPlane[1].u_width   = pOutPlane[0].u_width/2;
-            pOutPlane[1].u_height  = pOutPlane[0].u_height/2;
-            pOutPlane[1].u_topleft = 0;
-            pOutPlane[1].u_stride  = pOutPlane[0].u_stride/2;
-            pOutPlane[2].u_width   = pOutPlane[1].u_width;
-            pOutPlane[2].u_height  = pOutPlane[1].u_height;
-            pOutPlane[2].u_topleft = 0;
-            pOutPlane[2].u_stride  = pOutPlane[1].u_stride;
+        M4OSA_UInt32 sizeY = pEncoderContext->mCodecParams->FrameWidth *
+            pEncoderContext->mCodecParams->FrameHeight;
+        M4OSA_UInt32 sizeU = sizeY >> 2;
+        M4OSA_UInt32 size  = sizeY + 2*sizeU;
+        M4OSA_UInt8* pData = M4OSA_NULL;
+        buffer = new MediaBuffer((size_t)size);
+        pData = (M4OSA_UInt8*)buffer->data() + buffer->range_offset();
 
-            pOutPlane[0].pac_data = pData;
-            pOutPlane[1].pac_data = pData + sizeY;
-            pOutPlane[2].pac_data = pData + sizeY + sizeU;
+        // Prepare the output image for pre-processing
+        pOutPlane[0].u_width   = pEncoderContext->mCodecParams->FrameWidth;
+        pOutPlane[0].u_height  = pEncoderContext->mCodecParams->FrameHeight;
+        pOutPlane[0].u_topleft = 0;
+        pOutPlane[0].u_stride  = pOutPlane[0].u_width;
+        pOutPlane[1].u_width   = pOutPlane[0].u_width/2;
+        pOutPlane[1].u_height  = pOutPlane[0].u_height/2;
+        pOutPlane[1].u_topleft = 0;
+        pOutPlane[1].u_stride  = pOutPlane[0].u_stride/2;
+        pOutPlane[2].u_width   = pOutPlane[1].u_width;
+        pOutPlane[2].u_height  = pOutPlane[1].u_height;
+        pOutPlane[2].u_topleft = 0;
+        pOutPlane[2].u_stride  = pOutPlane[1].u_stride;
 
-            // Apply pre-processing
-            err = pEncoderContext->mPreProcFunction(
-                    pEncoderContext->mPreProcContext, M4OSA_NULL, pOutPlane);
-            VIDEOEDITOR_CHECK(M4NO_ERROR == err, err);
+        pOutPlane[0].pac_data = pData;
+        pOutPlane[1].pac_data = pData + sizeY;
+        pOutPlane[2].pac_data = pData + sizeY + sizeU;
 
-            // Convert MediaBuffer to the encoder input format if necessary
-            if (pEncoderContext->mI420ColorConverter) {
-                I420ColorConverter* converter = pEncoderContext->mI420ColorConverter;
-                int actualWidth = pEncoderContext->mCodecParams->FrameWidth;
-                int actualHeight = pEncoderContext->mCodecParams->FrameHeight;
+        // Apply pre-processing
+        err = pEncoderContext->mPreProcFunction(
+                pEncoderContext->mPreProcContext, M4OSA_NULL, pOutPlane);
+        VIDEOEDITOR_CHECK(M4NO_ERROR == err, err);
 
-                int encoderWidth, encoderHeight;
-                ARect encoderRect;
-                int encoderBufferSize;
+        // Convert MediaBuffer to the encoder input format if necessary
+        if (pEncoderContext->mI420ColorConverter) {
+            I420ColorConverter* converter = pEncoderContext->mI420ColorConverter;
+            int actualWidth = pEncoderContext->mCodecParams->FrameWidth;
+            int actualHeight = pEncoderContext->mCodecParams->FrameHeight;
 
-                if (converter->getEncoderInputBufferInfo(
-                            actualWidth, actualHeight,
-                            &encoderWidth, &encoderHeight,
-                            &encoderRect, &encoderBufferSize) == 0) {
+            int encoderWidth, encoderHeight;
+            ARect encoderRect;
+            int encoderBufferSize;
 
-                    MediaBuffer* newBuffer = new MediaBuffer(encoderBufferSize);
+            if (converter->getEncoderInputBufferInfo(
+                actualWidth, actualHeight,
+                &encoderWidth, &encoderHeight,
+                &encoderRect, &encoderBufferSize) == 0) {
 
-                    if (converter->convertI420ToEncoderInput(
-                                pData,  // srcBits
-                                actualWidth, actualHeight,
-                                encoderWidth, encoderHeight,
-                                encoderRect,
-                                (uint8_t*)newBuffer->data() + newBuffer->range_offset()) < 0) {
-                        LOGE("convertI420ToEncoderInput failed");
-                    }
+                MediaBuffer* newBuffer = new MediaBuffer(encoderBufferSize);
 
-                    // switch to new buffer
-                    buffer->release();
-                    buffer = newBuffer;
+                if (converter->convertI420ToEncoderInput(
+                    pData,  // srcBits
+                    actualWidth, actualHeight,
+                    encoderWidth, encoderHeight,
+                    encoderRect,
+                    (uint8_t*)newBuffer->data() + newBuffer->range_offset()) < 0) {
+                    LOGE("convertI420ToEncoderInput failed");
                 }
+
+                // switch to new buffer
+                buffer->release();
+                buffer = newBuffer;
             }
         }
-        else {
-            int width = pEncoderContext->mCodecParams->FrameWidth;
-            int height = pEncoderContext->mCodecParams->FrameHeight;
-            M4OSA_UInt32 sizeY = ALIGN(width*height,2048);
-            M4OSA_UInt32 sizeU = ALIGN(width*height/2, 2048);
-            M4OSA_UInt32 size  = sizeY + sizeU;
-
-            M4OSA_UInt8* pData = M4OSA_NULL;
-            LOGV("Create new mediabuffer of size %lu", size);
-            buffer = new MediaBuffer((size_t)size);
-            pData = (M4OSA_UInt8*)buffer->data() + buffer->range_offset();
-            memset(pData, 0, size);
-
-            // Prepare the output image for pre-processing
-            pOutPlane[0].u_width   = pEncoderContext->mCodecParams->FrameWidth;
-            pOutPlane[0].u_height  = pEncoderContext->mCodecParams->FrameHeight;
-            pOutPlane[0].u_topleft = 0;
-            pOutPlane[0].u_stride  = pOutPlane[0].u_width;
-            pOutPlane[1].u_width   = pOutPlane[0].u_width/2;
-            pOutPlane[1].u_height  = pOutPlane[0].u_height/2;
-            pOutPlane[1].u_topleft = 0;
-            pOutPlane[1].u_stride  = pOutPlane[0].u_stride/2;
-            pOutPlane[2].u_width   = pOutPlane[1].u_width;
-            pOutPlane[2].u_height  = pOutPlane[1].u_height;
-            pOutPlane[2].u_topleft = 0;
-            pOutPlane[2].u_stride  = pOutPlane[1].u_stride;
-
-            LOGV("pEncoderContext->mEncoderColorFormat is SemiPlanar");
-            tempBuffer = (M4OSA_UInt8 *)malloc(size);
-            pOutPlane[0].pac_data = tempBuffer;
-            pOutPlane[1].pac_data = tempBuffer + pOutPlane[0].u_width*pOutPlane[0].u_height;
-            pOutPlane[2].pac_data = tempBuffer + pOutPlane[0].u_width*pOutPlane[0].u_height +
-                pOutPlane[0].u_width/2*pOutPlane[0].u_height/2;
-
-            // Apply pre-processing
-            err = pEncoderContext->mPreProcFunction(
-                    pEncoderContext->mPreProcContext, M4OSA_NULL, pOutPlane);
-            VIDEOEDITOR_CHECK(M4NO_ERROR == err, err);
-
-            ColorConvertParams inputCP;
-            inputCP.width = width; //XXX - confirm on input parameters during resizing
-            inputCP.height = height;
-            inputCP.cropWidth = width;
-            inputCP.cropHeight = height;
-            inputCP.cropLeft = 0;
-            inputCP.cropRight = width;
-            inputCP.cropTop = 0;
-            inputCP.cropBottom = height;
-            inputCP.colorFormat = YCbCr420P;
-            inputCP.flags = COLOR_CONVERT_ALIGN_NONE;
-            inputCP.data = (uint8_t *)tempBuffer;
-            inputCP.fd = -1;
-
-            ColorConvertParams outputCP;
-            outputCP.width = width;
-            outputCP.height = height;
-            outputCP.cropWidth = width;
-            outputCP.cropHeight = height;
-            outputCP.cropLeft = 0;
-            outputCP.cropRight = width;
-            outputCP.cropTop = 0;
-            outputCP.cropBottom = height;
-            outputCP.colorFormat = YCbCr420SP;
-            outputCP.flags = COLOR_CONVERT_ALIGN_2048;
-            outputCP.data = (uint8_t *)pData;
-            outputCP.fd = -1;
-
-            pEncoderContext->mConvert( inputCP, outputCP, NULL);
-
-            if (pEncoderContext->mFd != -1) {
-                LOGV("DUMP FRAME of dimensions %ux%u, total size %lu",
-                        pEncoderContext->mCodecParams->FrameWidth,
-                        pEncoderContext->mCodecParams->FrameHeight, size);
-                int width =  pEncoderContext->mCodecParams->FrameWidth;
-                int height = pEncoderContext->mCodecParams->FrameHeight;
-                write(pEncoderContext->mFd, pData, width*height);
-                write(pEncoderContext->mFd, pData + sizeY, width*height/2);
-                close(pEncoderContext->mFd);
-                pEncoderContext->mFd = -1;
-            }
-        }
-
         // Set the metadata
         buffer->meta_data()->setInt64(kKeyTime, (int64_t)(Cts*1000));
     }
@@ -1263,9 +1121,6 @@ M4OSA_ERR VideoEditorVideoEncoder_processInputBuffer(
     nbBuffer = pEncoderContext->mEncoderSource->storeBuffer(buffer);
 
 cleanUp:
-    if (tempBuffer)
-        free(tempBuffer);
-
     if ( M4NO_ERROR == err ) {
         LOGV("VideoEditorVideoEncoder_processInputBuffer error 0x%X", err);
     } else {
