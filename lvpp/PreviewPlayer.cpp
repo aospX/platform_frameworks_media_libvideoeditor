@@ -232,6 +232,7 @@ status_t PreviewPlayer::setDataSource_l_jpg() {
     status_t error = mAudioSource->start();
     if (error != OK) {
         LOGV("Error starting dummy audio source");
+        mAudioSource->stop();
         mAudioSource.clear();
         return err;
     }
@@ -245,6 +246,7 @@ status_t PreviewPlayer::setDataSource_l_jpg() {
     setVideoSource(mVideoSource);
     status_t err1 = mVideoSource->start();
     if (err1 != OK) {
+        mVideoSource->stop();
         mVideoSource.clear();
         return err;
     }
@@ -724,6 +726,7 @@ status_t PreviewPlayer::initAudioDecoder() {
         status_t err = mAudioSource->start();
 
         if (err != OK) {
+            mAudioSource->stop();
             mAudioSource.clear();
             return err;
         }
@@ -767,6 +770,7 @@ status_t PreviewPlayer::initVideoDecoder(uint32_t flags) {
         status_t err = mVideoSource->start();
 
         if (err != OK) {
+            mVideoSource->stop();
             mVideoSource.clear();
             return err;
         }
@@ -788,6 +792,11 @@ void PreviewPlayer::onVideoEvent() {
         return;
     }
     mVideoEventPending = false;
+
+    if (mVideoSource == NULL) {
+        LOGE("VideoSource is null, returning from onVideoEvent\n");
+        return;
+    }
 
     if (mFlags & SEEK_PREVIEW) {
         mFlags &= ~SEEK_PREVIEW;
@@ -1207,6 +1216,7 @@ void PreviewPlayer::onPrepareAsyncEvent() {
         status_t err = finishSetDataSource_l();
 
         if (err != OK) {
+            mPrepareResult = err;
             abortPrepare(err);
             return;
         }
@@ -1216,6 +1226,7 @@ void PreviewPlayer::onPrepareAsyncEvent() {
         status_t err = initVideoDecoder(OMXCodec::kHardwareCodecsOnly);
 
         if (err != OK) {
+            mPrepareResult = err;
             abortPrepare(err);
             return;
         }
@@ -1225,6 +1236,7 @@ void PreviewPlayer::onPrepareAsyncEvent() {
         status_t err = initAudioDecoder();
 
         if (err != OK) {
+            mPrepareResult = err;
             abortPrepare(err);
             return;
         }
@@ -1480,6 +1492,11 @@ status_t PreviewPlayer::setImageClipProperties(uint32_t width,uint32_t height) {
 
 status_t PreviewPlayer::readFirstVideoFrame() {
     LOGV("PreviewPlayer::readFirstVideoFrame");
+
+    if (mVideoSource == NULL) {
+        LOGE("VideoSource is null, returning from readFirstVideoFrame\n");
+        return UNKNOWN_ERROR;
+    }
 
     if (!mVideoBuffer) {
         MediaSource::ReadOptions options;

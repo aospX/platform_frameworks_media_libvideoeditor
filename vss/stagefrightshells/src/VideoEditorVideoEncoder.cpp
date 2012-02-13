@@ -1013,6 +1013,9 @@ M4OSA_ERR VideoEditorVideoEncoder_open(M4ENCODER_Context pContext,
 #ifdef VIDEOEDITOR_FORCECODEC
     codecFlags |= OMXCodec::VIDEOEDITOR_FORCECODEC;
 #endif /* VIDEOEDITOR_FORCECODEC */
+    if (pEncoderContext->mCodecParams->FrameWidth * pEncoderContext->mCodecParams->FrameHeight >= 1920 * 1080) {
+        codecFlags |= OMXCodec::kUseMinBufferCount;
+    }
     pEncoderContext->mEncoder = OMXCodec::Create(
         pEncoderContext->mClient.interface(), encoderMetadata, true,
         pEncoderContext->mEncoderSource, NULL, codecFlags);
